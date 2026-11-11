@@ -1,0 +1,7 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+  </Configurations>
+  <Project Path="ExplorerHandleCapture.vcxproj" Id="8d3f2a16-9c47-4b2e-9a51-6f0d3c7e8b42" />
+  <Project Path="HandleReader\HandleReader.vcxproj" Id="5b9e1c74-2a68-4d3f-8e17-9c4b2a6d5f30" />
+</Solution>
