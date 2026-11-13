@@ -1,50 +1,42 @@
 #include "Decode.h"
 
-ZyanStatus DisassembleInstruction(
-    _In_ LPCVOID lpAddress,
-    _Out_ ZydisDisassembledInstruction* pDecoded
-) {
-    if (NULL == pDecoded) {
-        return ZYAN_STATUS_INVALID_ARGUMENT;
-    }
+ZyanStatus DisassembleInstruction(LPCVOID address, ZydisDisassembledInstruction* decoded)
+{
+	if (!decoded)
+		return ZYAN_STATUS_INVALID_ARGUMENT;
 
-    ZeroMemory(pDecoded, sizeof(*pDecoded));
+	ZeroMemory(decoded, sizeof(*decoded));
 
-    return ZydisDisassembleIntel(
-        ZYDIS_MACHINE_MODE_LONG_64,
-        (ZyanUPointer) lpAddress,
-        lpAddress,
-        AMD64_INSTRUCTION_MAX_LENGTH,
-        pDecoded
-    );
+	return ZydisDisassembleIntel(
+		ZYDIS_MACHINE_MODE_LONG_64,
+		(ZyanUPointer)address,
+		address,
+		AMD64_INSTRUCTION_MAX_LENGTH,
+		decoded);
 }
 
-SIZE_T GetFunctionSize(
-    _In_reads_bytes_(cbMaxSize) LPCVOID lpFunction,
-    _In_ SIZE_T cbMaxSize
-) {
-    SIZE_T cbOffset = 0;
+SIZE_T GetFunctionSize(LPCVOID function, SIZE_T maxSize)
+{
+	SIZE_T offset = 0;
 
-    while (cbOffset < cbMaxSize) {
-        ZydisDisassembledInstruction decoded = { 0 };
-        ZyanStatus status = ZydisDisassembleIntel(
-            ZYDIS_MACHINE_MODE_LONG_64,
-            (ZyanUPointer) lpFunction + cbOffset,
-            (LPCBYTE) lpFunction + cbOffset,
-            cbMaxSize - cbOffset,
-            &decoded
-        );
+	while (offset < maxSize)
+	{
+		ZydisDisassembledInstruction decoded = { 0 };
+		ZyanStatus status = ZydisDisassembleIntel(
+			ZYDIS_MACHINE_MODE_LONG_64,
+			(ZyanUPointer)function + offset,
+			(LPCBYTE)function + offset,
+			maxSize - offset,
+			&decoded);
 
-        if (!ZYAN_SUCCESS(status)) {
-            return 0;
-        }
+		if (!ZYAN_SUCCESS(status))
+			return 0;
 
-        cbOffset += decoded.info.length;
+		offset += decoded.info.length;
 
-        if (ZYDIS_MNEMONIC_RET == decoded.info.mnemonic) {
-            return cbOffset;
-        }
-    }
+		if (decoded.info.mnemonic == ZYDIS_MNEMONIC_RET)
+			return offset;
+	}
 
-    return 0;
+	return 0;
 }
