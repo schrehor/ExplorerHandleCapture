@@ -3,7 +3,9 @@
 ZyanStatus DisassembleInstruction(LPCVOID address, ZydisDisassembledInstruction* decoded)
 {
 	if (!decoded)
+	{
 		return ZYAN_STATUS_INVALID_ARGUMENT;
+	}
 
 	ZeroMemory(decoded, sizeof(*decoded));
 
@@ -30,12 +32,16 @@ SIZE_T GetFunctionSize(LPCVOID function, SIZE_T maxSize)
 			&decoded);
 
 		if (!ZYAN_SUCCESS(status))
+		{
 			return 0;
+		}
 
 		offset += decoded.info.length;
 
 		if (decoded.info.mnemonic == ZYDIS_MNEMONIC_RET)
+		{
 			return offset;
+		}
 	}
 
 	return 0;
